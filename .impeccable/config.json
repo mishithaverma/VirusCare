@@ -1,0 +1,14 @@
+{
+  "detector": {
+    "ignoreRules": [],
+    "ignoreFiles": [],
+    "ignoreValues": [
+      {
+        "rule": "overused-font",
+        "value": "inter",
+        "createdAt": "2026-11-12T11:50:16.393Z",
+        "reason": "agent decided: Inter is a deliberate neutral enterprise/clinical typeface for an internal hospital admin tool where legibility and convention outweigh distinctiveness"
+      }
+    ]
+  }
+}

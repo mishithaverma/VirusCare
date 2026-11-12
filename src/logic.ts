@@ -2,10 +2,12 @@ export type Role = 'admin' | 'nurse' | 'doctor' | 'manager'
 export type Status = 'active' | 'approved' | 'discharged' | 'deceased'
 export interface Temp { date: string; value: number; by: string; at: string }
 export interface Visit { date: string; by: string; at: string; notes: string; treatment: string; emergency?: string }
-export interface Patient { id: string; name: string; age: number; room: number | null; admitted: string; outcomeDate?: string; status: Status; temps: Temp[]; visits: Visit[] }
+export interface Patient { id: string; name: string; age: number; room: number | null; admitted: string; outcomeDate?: string; approvedDate?: string; status: Status; temps: Temp[]; visits: Visit[] }
 export interface Log { at: string; by: string; msg: string }
-export interface DB { offset: number; patients: Patient[]; log: Log[] }
-export const CAP = 74, FEVER = 38
+export interface Settings { facilityName: string }
+export interface DB { version: number; offset: number; patients: Patient[]; log: Log[]; settings: Settings }
+export const CAP = 74, FEVER = 38, SCHEMA_VERSION = 1
+export const DEFAULT_SETTINGS: Settings = { facilityName: 'VirusCare Quarantine & Treatment Centre' }
 
 const pad = (n: number) => String(n).padStart(2, '0')
 export const fmt = (d: Date) => `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}` // local date, not UTC
@@ -24,6 +26,14 @@ export function feverFree(p: Patient, today: string): number {
 }
 export const eligible = (p: Patient, today: string) => p.status === 'active' && feverFree(p, today) >= 3
 
+// Days a patient has been dischargeable but not yet discharged (the "extra day or two" the doctor complained about).
+// For approved patients: days since approval. For eligible-but-unapproved: fever-free days beyond the required 3.
+export function dischargeDelay(p: Patient, today: string): number {
+  if (p.status === 'approved') { let n = 0, d = p.approvedDate; while (d && d !== today) { n++; d = addDays(d, 1) } return n }
+  if (eligible(p, today)) return feverFree(p, today) - 3
+  return 0
+}
+
 export function seed(): DB {
   const today = fmt(new Date()), patients: Patient[] = []
   const F = ['Aarav', 'Diya', 'Kabir', 'Meera', 'Rohan', 'Isha', 'Arjun', 'Sara', 'Vivaan', 'Anaya', 'Neil', 'Tara'], L = ['Shah', 'Mehta', 'Iyer', 'Nair', 'Khan', 'Patil', 'Gupta', 'Rao']
@@ -38,13 +48,28 @@ export function seed(): DB {
     if (i % 4 === 0 && i % 3 !== 0) visits.push({ date: today, by: 'Dr. Rao', at: '10:15', notes: 'Stable, continue monitoring', treatment: 'Hydration, paracetamol' })
     patients.push({ id: 'P' + String(i + 1).padStart(3, '0'), name: `${F[i % 12]} ${L[(i * 3) % 8]}`, age: 20 + ((i * 11) % 55), room: i + 1, admitted: addDays(today, -days), status: 'active', temps, visits })
   }
-  patients.filter((p, i) => i % 17 === 0 && feverFree(p, today) >= 3).forEach(p => { p.status = 'approved'; p.visits.push({ date: today, by: 'Dr. Rao', at: '09:40', notes: 'Fever-free 3 days. Approved.', treatment: 'None' }) })
+  patients.filter((p, i) => i % 17 === 0 && feverFree(p, today) >= 3).forEach(p => { p.status = 'approved'; p.approvedDate = addDays(today, -1); p.visits.push({ date: today, by: 'Dr. Rao', at: '09:40', notes: 'Fever-free 3 days. Approved.', treatment: 'None' }) })
   for (let i = 0; i < 14; i++) patients.push({ id: 'P' + String(51 + i).padStart(3, '0'), name: `${F[(i + 4) % 12]} ${L[(i + 2) % 8]}`, age: 25 + i * 3, room: null, admitted: addDays(today, -12 - i), outcomeDate: addDays(today, -(i % 6) - 1), status: i < 11 ? 'discharged' : 'deceased', temps: [], visits: [] })
-  return { offset: 0, patients, log: [{ at: stamp(), by: 'System', msg: 'Demonstration data loaded' }] }
+  return { version: SCHEMA_VERSION, offset: 0, patients, log: [{ at: stamp(), by: 'System', msg: 'Demonstration data loaded' }], settings: { ...DEFAULT_SETTINGS } }
+}
+
+// Upgrade older/partial saved blobs to the current schema so new fields never crash the app.
+export function migrate(raw: unknown): DB {
+  if (!raw || typeof raw !== 'object') return seed()
+  const db = raw as Partial<DB>
+  if (!Array.isArray(db.patients) || !Array.isArray(db.log)) return seed()
+  return {
+    version: SCHEMA_VERSION,
+    offset: typeof db.offset === 'number' ? db.offset : 0,
+    patients: db.patients,
+    log: db.log,
+    settings: { ...DEFAULT_SETTINGS, ...(db.settings ?? {}) },
+  }
 }
 export const stats = (db: DB) => {
   const today = todayOf(db), act = db.patients.filter(isActive), total = db.patients.length
   const deaths = db.patients.filter(p => p.status === 'deceased').length, mort = total ? deaths / total * 100 : 0
   return { today, act, total, deaths, mort, success: total ? 100 - mort : 100, discharged: db.patients.filter(p => p.status === 'discharged').length,
-    tPend: act.filter(p => !tempOn(p, today)), vPend: act.filter(p => !visitOn(p, today)), elig: act.filter(p => eligible(p, today)), approved: act.filter(p => p.status === 'approved') }
+    tPend: act.filter(p => !tempOn(p, today)), vPend: act.filter(p => !visitOn(p, today)), elig: act.filter(p => eligible(p, today)), approved: act.filter(p => p.status === 'approved'),
+    delayed: act.filter(p => dischargeDelay(p, today) > 0), delayDays: act.reduce((s, p) => s + dischargeDelay(p, today), 0) }
 }
